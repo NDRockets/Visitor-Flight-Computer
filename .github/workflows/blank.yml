@@ -1,0 +1,179 @@
+//Libraries
+#include <SD.h>
+#include <SPI.h>
+#include <MPU6050_tockn.h>
+#include <Servo.h>
+#include <Wire.h>
+#include "Seeed_BME280.h"
+
+//Initiate Communication with MPU and BME
+MPU6050 mpu6050(Wire);
+BME280 bme280;
+
+//Servo/MPU Variables
+Servo xServ,yServ;
+float yAccVal, xAngle, yAngle, servoWrite=0;
+float XtvcServoOffset = 85; //X Servo Offset (X Servo Has No Blue Tape On Wires)
+float YtvcServoOffset = 83; //Y Servo Offset (Y Servo Has Blue Tape On Wires)
+unsigned long servoTimer;
+
+//Stage Timers/Counters
+unsigned long stageZeroTimer, stageOneTimer;
+int stageStat=0;
+
+//Barometer Data Variables
+File barometerData;
+int chipSelect=4;   //Select CS Pin
+float barometerWriteDelay = 500; //Set Time In Bewteen Barometer Writes (In Milliseconds)
+unsigned long writeTimer, lastWrite=0;
+float pressure, heightMeters;
+
+//Modify Timing For Flight
+int servoStart=400;  //TVC Delay From Launch
+unsigned long servoEnd=4000000;  //TVC Disable Timer
+int ejectionDelay=2000, ejectionHold=3000;
+
+//PWM Pins
+int xServPin=5, yServPin=6, buzzerPin=3, fairingPin=9;
+
+//Calculate Pre-Launch Values (Variables)
+float initPressure, initHeightMeters, initHeightAvg;
+int BMEsetup=0;
+
+void setup() {
+  SD.begin(chipSelect);
+  xServ.attach(xServPin);
+  yServ.attach(yServPin);
+  Wire.begin();
+  mpu6050.begin();
+
+  //Straighten Servos
+  xServ.write(XtvcServoOffset);
+  yServ.write(YtvcServoOffset);
+ 
+  //Setup Pins
+  pinMode(buzzerPin,OUTPUT);
+  pinMode(fairingPin,OUTPUT);
+
+  //Check BME Opperational Status
+  if(!bme280.init()){
+    Serial.println("Device error!");
+  }
+
+  //Calculate Gyro Offsets
+  analogWrite(buzzerPin, 102); //Indicate Gyro Offset Calculation
+  delay(500);
+  analogWrite(buzzerPin,0);
+  mpu6050.calcGyroOffsets(true);
+
+  //Calculate Height Offsets
+  analogWrite(buzzerPin, 102); //Indicate Height Offset Calculation
+  delay(500);
+  analogWrite(buzzerPin,0);
+  delay(500);
+  analogWrite(buzzerPin, 102);
+  delay(500);
+  analogWrite(buzzerPin, 0);
+  while(BMEsetup<=2){         //Run Through Height Offset Calculation
+    delay(3000);
+    initPressure = (bme280.getPressure());
+    initHeightMeters = bme280.calcAltitude(initPressure);
+    initHeightAvg = initHeightAvg + initHeightMeters;
+      if(BMEsetup>=2){
+        initHeightAvg = initHeightAvg/3.;
+        analogWrite(buzzerPin, 102);  //Indicate End Of Calculating Offsets
+        delay(3000);
+        analogWrite(buzzerPin,0);
+      }
+    BMEsetup=BMEsetup + 1;
+  }
+}
+
+
+void loop() {
+
+//Check MPU
+mpu6050.update();
+
+//Stage 0 (Pre-Launch)
+if(stageStat==0){
+  //Proceed To Stage 1
+  if(mpu6050.getAccY() >= 1.8){
+     stageZeroTimer=millis();
+     servoWrite = millis();
+     stageStat=1;
+  }
+}
+
+//Stage 1 (Liftoff)
+if(stageStat==1){
+  //Set Timer
+  stageOneTimer=(millis()-stageZeroTimer);
+
+  //TVC Control
+  if(stageOneTimer>=servoStart and servoTimer>=10){
+    //X-Axis Coding
+    xAngle=(mpu6050.getGyroAngleX() + XtvcServoOffset);
+      if(xAngle<45){
+        xAngle=45;
+      }
+      if(xAngle>121){
+        xAngle=121;
+      }
+    
+    //Y-Axis Coding
+    yAngle=((0 - mpu6050.getGyroAngleZ()) + YtvcServoOffset);
+      if(yAngle<45){
+        yAngle=45;
+      }
+      if(yAngle>121){
+        yAngle=121;
+      }
+   
+    //Write to Servos
+    xServ.write(xAngle);
+    yServ.write(yAngle);
+
+    //Mark The Servo Write
+    servoWrite = millis();
+  }
+  
+  if(stageOneTimer>=servoEnd){
+    xServ.write(XtvcServoOffset);
+    yServ.write(YtvcServoOffset);
+    stageStat=2;
+  
+  }
+
+  servoTimer = millis()- servoWrite;
+  
+  }
+  
+//Stage 2 (Parachute Ejection)
+if(stageStat==2){
+  delay(ejectionDelay);
+  analogWrite(fairingPin,255);
+  delay(ejectionHold);
+  analogWrite(fairingPin,0);
+  stageStat=3;
+}
+
+//Write to SD Card
+writeTimer = (millis() - lastWrite);
+if(writeTimer>=barometerWriteDelay){
+  barometerData = SD.open("Data.txt", FILE_WRITE);
+  if(barometerData){
+    pressure = bme280.getPressure();
+    heightMeters = bme280.calcAltitude(pressure);
+    barometerData.print("Height Above Sea Level: ");
+    barometerData.print(heightMeters);
+    barometerData.print("  ");
+    barometerData.print("Height From Launch Point: ");
+    heightMeters = (heightMeters-initHeightAvg);
+    barometerData.println(heightMeters);
+    barometerData.close();
+  }
+  lastWrite = millis();
+}
+}
+
